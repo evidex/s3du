@@ -12,6 +12,7 @@
 
 from __future__ import print_function
 
+import argparse
 import csv
 import json
 import os
@@ -24,69 +25,41 @@ import warnings
 import boto3
 
 
-USAGE = """Usage: s3du options|filename.json
-
-Options:
--i      interactive, run ncdu
--v      verbose, display some progress
--c STR  only show this storage class, values: STANDARD, STANDARD_IA, GLACIER, DEEP_ARCHIVE"""
+STORAGE_CLASSES = {'STANDARD', 'STANDARD_IA', 'GLACIER', 'DEEP_ARCHIVE'}
 
 
-class s3du(object):
-    def __init__(self):
+class s3du:
+    def __init__(self, args):
         self.s3 = boto3.client('s3')
-        self.verbose = False
-        self.interactive = False
-        self.filename = None
-        self.keep_file = False
-        self.nocache = False
-        self.storage_class = None
-        self.classes = set()
         self.csv_name = os.path.expanduser('~/.cache/s3du-cache.csv')
+        self.classes = set()
 
-    def usage(self):
-        print(USAGE, file=sys.stderr)
-        exit(1)
-
-    def parse_args(self, argv):
-        if len(argv) == 1:
-            self.usage()
-
-        prev = None
-        for arg in argv[1:]:
-            if prev == '-c':
-                self.storage_class = arg
-                prev = None
-                continue
-            if arg == '-i':
-                self.interactive = True
-            elif arg == '-v':
-                self.verbose = True
-            elif arg == '-c':
-                prev = arg
-                continue
-            elif arg == '-n':
-                self.nocache = True
-            elif arg.startswith('-'):
-                self.usage()
-            elif self.filename:
-                self.usage()
-            else:
-                self.filename = arg
-                self.keep_file = True
+        self.verbose = args.verbose
+        self.interactive = args.interactive
+        self.filename = args.filename
+        self.keep_file = args.filename is not None
+        self.nocache = args.no_cache
+        self.storage_class = args.storage_class
+        self.bucket = args.bucket
+        self.prefix = args.prefix or ''
+        if self.prefix and not self.prefix.endswith('/'):
+            self.prefix += '/'
 
         if not self.filename:
             warnings.simplefilter('ignore', 'tempnam')
             self.filename = tempfile.mkstemp(dir=tempfile.gettempdir(), prefix='s3du_')[1]
 
+
     def list_buckets(self):
+        if self.bucket:
+            return [self.bucket]
         tmp = self.s3.list_buckets()
         return [b['Name'] for b in tmp['Buckets']]
 
     def cache_files(self):
         if os.path.exists(self.csv_name) and not self.nocache:
             if time.time() - os.stat(self.csv_name).st_mtime < 3600:
-                print('Using file list from cache: %s' % self.csv_name)
+                print(f'Using file list from cache: {self.csv_name}')
                 return
 
         with open(self.csv_name, 'w') as f:
@@ -96,9 +69,10 @@ class s3du(object):
             buckets = self.list_buckets()
             for bucket in buckets:
                 if self.verbose:
-                    print("Listing bucket %s, found %u files already..." % (bucket, count))
+                    print(f'Listing bucket {bucket}, found {count} files already...')
 
-                args = {'Bucket': bucket, 'MaxKeys': 1000}
+                args = {'Bucket': bucket, 'MaxKeys': 1000, 'Prefix': self.prefix}
+                uri = f's3://{bucket}/{self.prefix}'
                 while True:
                     res = self.s3.list_objects_v2(**args)
                     for item in res['Contents']:
@@ -108,7 +82,7 @@ class s3du(object):
                     if 'NextContinuationToken' in res:
                         args['ContinuationToken'] = res['NextContinuationToken']
                         if self.verbose:
-                            print("Listing bucket %s, found %u files already..." % (bucket, count))
+                            print(f'Listing bucket {uri}, found {count} files already...')
                     else:
                         break
 
@@ -170,30 +144,37 @@ class s3du(object):
 
         return res
 
-    @classmethod
-    def main(cls):
-        me = cls()
-        me.parse_args(sys.argv)
+    def main(self):
+        self.cache_files()  # list files and write ~/.cache/s3du-cache.csv
 
-        me.cache_files()  # list files and write ~/.cache/s3du-cache.csv
+        files = self.list_files()
+        tree = self.parse_list(files)
+        ncdu = self.convert_tree(tree)
 
-        files = me.list_files()
-        tree = me.parse_list(files)
-        ncdu = me.convert_tree(tree)
-
-        with open(me.filename, "w") as f:
+        with open(self.filename, "w") as f:
             f.write(json.dumps(ncdu))
 
-        subprocess.Popen(['ncdu', '-f', me.filename]).wait()
+        subprocess.Popen(['ncdu', '-f', self.filename]).wait()
 
-        if not me.keep_file:
-            os.unlink(me.filename)
+        if not self.keep_file:
+            os.unlink(self.filename)
 
-        print('Found objects of classes: %s.' % ', '.join(me.classes))
+        print(f'Found objects of classes: {", ".join(self.classes)}.')
 
 
 def main():
-    s3du().main()
+    parser = argparse.ArgumentParser('s3du - ncdu for S3')
+
+    parser.add_argument('-b', '--bucket', help='Target just this bucket, rather than all available')
+    parser.add_argument('-p', '--prefix', help='Limit search under this prefix')
+    parser.add_argument('-i', '--interactive', action='store_true', help='Interactive, run ncdu')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Verbose Mode')
+    parser.add_argument('-c', '--storage-class', choices=STORAGE_CLASSES, help='Show only this storage class')
+    parser.add_argument('-n', '--no-cache', action='store_true', help='Don\'t leverage the cache file')
+    parser.add_argument('-f', '--filename', help='Output filename')
+
+    args = parser.parse_args()
+    s3du(args).main()
 
 
 if __name__ == '__main__':
