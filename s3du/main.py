@@ -31,7 +31,12 @@ STORAGE_CLASSES = {'STANDARD', 'STANDARD_IA', 'GLACIER', 'DEEP_ARCHIVE'}
 class s3du:
     def __init__(self, args):
         self.s3 = boto3.client('s3')
-        self.csv_name = os.path.expanduser('~/.cache/s3du-cache.csv')
+        self.bucket = args.bucket
+        self.prefix = args.prefix or ''
+        if self.prefix and not self.prefix.endswith('/'):
+            self.prefix += '/'
+        key = f'{self.bucket}_{self.prefix.replace("/", "_")}'
+        self.csv_name = os.path.expanduser(f'~/.cache/s3du-cache-{key}.csv')
         self.classes = set()
 
         self.verbose = args.verbose
@@ -40,15 +45,10 @@ class s3du:
         self.keep_file = args.filename is not None
         self.nocache = args.no_cache
         self.storage_class = args.storage_class
-        self.bucket = args.bucket
-        self.prefix = args.prefix or ''
-        if self.prefix and not self.prefix.endswith('/'):
-            self.prefix += '/'
 
         if not self.filename:
             warnings.simplefilter('ignore', 'tempnam')
             self.filename = tempfile.mkstemp(dir=tempfile.gettempdir(), prefix='s3du_')[1]
-
 
     def list_buckets(self):
         if self.bucket:
@@ -62,6 +62,7 @@ class s3du:
                 print(f'Using file list from cache: {self.csv_name}')
                 return
 
+        print(f'Listing files and saving to {self.csv_name}...')
         with open(self.csv_name, 'w') as f:
             writer = csv.writer(f)
             count = 0
